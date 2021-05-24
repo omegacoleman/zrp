@@ -25,7 +25,7 @@ inline void load_config(const string_view filename) {
 	static json::value jv = parse_file(filename);
 	cfg = json::value_to<config_t>(jv);
 
-	log::as(log::tag_server{}).info("Loaded config : ");
+	log::as(log::tag_client{}).info("Loaded config : ");
 	pretty_print(json::value_from(cfg));
 
 	try_set_rlimit_nofile(cfg.rlimit_nofile);

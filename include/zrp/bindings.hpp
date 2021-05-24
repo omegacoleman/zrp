@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <atomic>
 #include <deque>
 #include <chrono>
@@ -26,7 +27,6 @@
 #include "boost/uuid/uuid_generators.hpp"
 #include "boost/uuid/uuid_io.hpp"
 
-#define FMT_HEADER_ONLY
 #include "fmt/core.h"
 #include "fmt/color.h"
 #include "fmt/chrono.h"
@@ -46,7 +46,6 @@ using std::weak_ptr;
 using std::make_shared;
 using std::enable_shared_from_this;
 using std::make_unique;
-using std::experimental::coroutine_handle;
 using boost::asio::buffer;
 using boost::asio::async_read;
 using boost::asio::async_write;

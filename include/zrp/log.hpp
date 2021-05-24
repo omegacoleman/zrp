@@ -215,6 +215,7 @@ struct message {
 			fmt::format(may(severity_style), "{}", to_string(severity_)),
 			fmt::format(may(tag_style), "{}", to_string(tag_)),
 			fmt::format(may(msg_style), "{}", msg_));
+		std::fflush(stdout);
 		fired_ = true;
 	}
 };

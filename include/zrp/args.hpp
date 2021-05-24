@@ -30,14 +30,24 @@ static inline program_action_t program_action = program_action_t::help;
 static inline string program_name = "";
 static inline string config_file_path = "config.json";
 static inline bool dump_full = false;
+#ifdef _MSC_VER
+static inline bool with_color = false; // avoid writing garbage to windows cmd
+#else
 static inline bool with_color = true;
+#endif
 static inline bool show_trace = false;
 static inline bool show_debug = false;
 
 inline void parse_env() {
+#ifdef _MSC_VER
+	if (std::getenv("ZRP_FORCECOLOR")) {
+		with_color = false;
+	}
+#else
 	if (std::getenv("ZRP_NOCOLOR")) {
 		with_color = false;
 	}
+#endif
 	if (std::getenv("ZRP_TRACE")) {
 		show_trace = true;
 	}
@@ -96,7 +106,11 @@ inline void print_usage() noexcept {
 			"    help                         show this message\n"
 			"\n"
 			"supported envs:\n"
+#ifdef _MSC_VER
+			"    ZRP_FORCECOLOR               output ANSI escape sequences even on windows\n"
+#else
 			"    ZRP_NOCOLOR                  not to add color or styling escape sequences\n"
+#endif
 			"    ZRP_TRACE                    show logs at level TRAC\n"
 			"    ZRP_DEBUG                    show logs at level DEBG and TRAC\n"
 			"\n",

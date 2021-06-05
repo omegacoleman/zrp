@@ -13,6 +13,7 @@
 #include "zrp/msg.hpp"
 #include "zrp/log.hpp"
 #include "zrp/rlimit.hpp"
+#include "zrp/exceptions.hpp"
 
 namespace zrp {
 
@@ -180,18 +181,40 @@ struct server : enable_shared_from_this<server> {
 	bool stopping_ = false;
 	log::logger logger_;
 
+	struct socket_type : enable_shared_from_this<socket_type> {
+		asio::io_context &ioc_;
+		tcp::socket s_;
+		steady_timer ddl_;
+		log::logger logger_;
+		shared_ptr<server> server_;
+
+		bool stopping_ = false;
+		bool finished_ = false;
+
+		socket_type(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server);
+		static shared_ptr<socket_type> create(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server);
+
+		void try_stop() noexcept;
+		void handle_error(const exception &e) noexcept;
+
+		void run();
+		awaitable<void> recv_hello();
+		awaitable<void> ddl_actor();
+		awaitable<void> handle_hello_msg(msg::client_hello hello);
+		awaitable<void> handle_hello_msg(msg::tcp_share_worker_hello hello);
+	};
+	list<weak_ptr<socket_type>> sockets_;
+
 	server(asio::io_context &ioc);
 	static shared_ptr<server> create(asio::io_context &ioc);
 
 	void try_stop() noexcept;
 	void handle_error(const exception &e) noexcept;
+	void cleanup_sockets();
 
 	void run();
 	awaitable<void> serve();
-	awaitable<void> handle_socket(tcp::socket s);
-
-	awaitable<void> handle_hello_msg(msg::client_hello hello, tcp::socket s);
-	awaitable<void> handle_hello_msg(msg::tcp_share_worker_hello hello, tcp::socket s);
+	void handle_socket(tcp::socket s);
 };
 
 inline tcp_share::tcp_share(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, unsigned short listen_port)
@@ -566,6 +589,11 @@ inline void server::try_stop() noexcept {
 			ptr->try_stop();
 		}
 	}
+	for (auto& it : sockets_) {
+		if (auto ptr = it.lock()) {
+			ptr->try_stop();
+		}
+	}
 	ac_.close();
 }
 
@@ -593,9 +621,7 @@ inline awaitable<void> server::serve() {
 		auto sg = this->shared_from_this();
 		for (;;) {
 			tcp::socket s = co_await ac_.async_accept(asio::use_awaitable);
-			co_spawn(ioc_, [this, sg, s = move(s)]() mutable -> awaitable<void> {
-				co_await handle_socket(move(s));
-			}, asio::detached);
+			handle_socket(move(s));
 		}
 	} catch(const exception &e) {
 		handle_error(e);
@@ -603,42 +629,118 @@ inline awaitable<void> server::serve() {
 	}
 }
 
-inline awaitable<void> server::handle_socket(tcp::socket s) {
+inline void server::cleanup_sockets() {
+	sockets_.remove_if([](auto it) -> bool {
+		return it.expired();
+	});
+}
+
+inline void server::handle_socket(tcp::socket s) {
+	auto ptr = server::socket_type::create(ioc_, move(s), this->shared_from_this());
+	cleanup_sockets();
+	sockets_.push_back(ptr);
+	ptr->run();
+}
+
+inline server::socket_type::socket_type(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server)
+	: ioc_(ioc), s_(move(s)), ddl_(ioc), logger_(log::tag_server{}), server_(server)
+{}
+
+inline shared_ptr<server::socket_type> server::socket_type::create(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server) {
+	return make_shared<server::socket_type>(ioc, move(s), server);
+}
+
+inline void server::socket_type::try_stop() noexcept {
+	if (stopping_)
+		return;
+	stopping_ = true;
+	if (!finished_) {
+		try {
+			s_.close();
+		} catch (...) {}
+	}
 	try {
-		auto m = co_await recv_msg(s);
-		co_await visit([this](auto msg, tcp::socket s) mutable -> awaitable<void> {
-			return handle_hello_msg(msg, move(s));
-		}, unmarshal_msg<msg::client_hello, msg::tcp_share_worker_hello>(m), variant<tcp::socket>(move(s)));
-	} catch(const exception &e) {
-		if (!stopping_) {
-			logger_.warning("got error handling hello msg : ").with_exception(e);
-		}
+		ddl_.cancel();
+	} catch (...) {}
+}
+
+inline void server::socket_type::handle_error(const exception& e) noexcept {
+	if (finished_)
+		return;
+	if (!stopping_) {
+		logger_.error("got an exception, stopping : ").with_exception(e);
+		try_stop();
+	} else {
+		logger_.trace("exited by exception : ").with_exception(e);
 	}
 }
 
-inline awaitable<void> server::handle_hello_msg(msg::client_hello hello, tcp::socket s) {
+inline void server::socket_type::run() {
+	ddl_.expires_after(chrono::seconds{30});
+	auto sg = this->shared_from_this();
+	co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
+		co_await recv_hello();
+	}, asio::detached);
+	co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
+		co_await ddl_actor();
+	}, asio::detached);
+}
+
+inline awaitable<void> server::socket_type::recv_hello() {
+	try {
+		auto m = co_await recv_msg(s_);
+		co_await visit([this](auto msg) mutable -> awaitable<void> {
+			return handle_hello_msg(msg);
+		}, unmarshal_msg<msg::client_hello, msg::tcp_share_worker_hello>(m));
+		finished_ = true;
+		try_stop();
+	} catch(const exception &e) {
+		handle_error(e);
+	}
+}
+
+inline awaitable<void> server::socket_type::ddl_actor() {
+	try {
+		try {
+			co_await ddl_.async_wait(asio::use_awaitable);
+		} catch (const system_error & se) {
+			if (se.code() != asio::error::operation_aborted) {
+				throw;
+			}
+		}
+		if (stopping_ || finished_) {
+			co_return;
+		}
+		logger_.warning("timeout exceeded : recv_hello()");
+		try_stop();
+	} catch (const exception& e) {
+		handle_error(e);
+	}
+}
+
+inline awaitable<void> server::socket_type::handle_hello_msg(msg::client_hello hello) {
 	string client_uuid{hello.client_uuid};
 
-	ctrl_ptr_t ctrl = ctrl_t::create(ioc_, move(s), client_uuid);
-	if (ctrls_.find(client_uuid) == ctrls_.end()) {
-		ctrls_.emplace(client_uuid, ctrl);
+	ctrl_ptr_t ctrl = ctrl_t::create(ioc_, move(s_), client_uuid);
+	if (server_->ctrls_.find(client_uuid) == server_->ctrls_.end()) {
+		server_->ctrls_.emplace(client_uuid, ctrl);
 	} else {
-		if (ctrls_.at(client_uuid).expired()) {
-			ctrls_.at(client_uuid) = ctrl;
+		if (server_->ctrls_.at(client_uuid).expired()) {
+			server_->ctrls_.at(client_uuid) = ctrl;
 		} else {
-			throw std::logic_error{"same client already connected"};
+			throw exceptions::duplicate_client{};
 		}
 	}
 
 	for (auto it : hello.tcp_shares) {
 		string id{it.id};
-		if (tcp_shares_.find(id) == tcp_shares_.end()) {
-			tcp_shares_.emplace(it.id, ctrl->add_tcp_share(id, it.port));
+		if (server_->tcp_shares_.find(id) == server_->tcp_shares_.end()) {
+			server_->tcp_shares_.emplace(it.id, ctrl->add_tcp_share(id, it.port));
 		} else {
-			if (tcp_shares_.at(id).expired()) {
-				tcp_shares_.at(id) = ctrl->add_tcp_share(id, it.port);
+			if (server_->tcp_shares_.at(id).expired()) {
+				server_->tcp_shares_.at(id) = ctrl->add_tcp_share(id, it.port);
 			} else {
-				throw std::logic_error{std::string("duplicate tcp share ") + id};
+				throw exceptions::duplicate_tcp_share{id};
 			}
 		}
 	}
@@ -646,14 +748,14 @@ inline awaitable<void> server::handle_hello_msg(msg::client_hello hello, tcp::so
 	co_return;
 }
 
-inline awaitable<void> server::handle_hello_msg(msg::tcp_share_worker_hello hello, tcp::socket s) {
+inline awaitable<void> server::socket_type::handle_hello_msg(msg::tcp_share_worker_hello hello) {
 	string tcp_share_id{hello.tcp_share_id};
 
-	if (auto tcp_share = tcp_shares_.at(tcp_share_id).lock()) {
+	if (auto tcp_share = server_->tcp_shares_.at(tcp_share_id).lock()) {
 
 		tcp_share_worker_weak_ptr_t worker_weak_ptr;
 		{
-			auto worker_ptr = tcp_share_worker::create(ioc_, tcp_share, hello.worker_id, move(s));
+			auto worker_ptr = tcp_share_worker::create(ioc_, tcp_share, hello.worker_id, move(s_));
 			worker_ptr->run();
 			worker_weak_ptr = worker_ptr;
 		}
@@ -662,7 +764,7 @@ inline awaitable<void> server::handle_hello_msg(msg::tcp_share_worker_hello hell
 			co_return;
 		}, asio::detached);
 	} else {
-		throw std::out_of_range("tcp share already closed");
+		throw exceptions::tcp_share_closed{};
 	}
 	co_return;
 }

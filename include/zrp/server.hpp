@@ -11,7 +11,6 @@
 #include "zrp/forwarder.hpp"
 #include "zrp/waitqueue.hpp"
 #include "zrp/msg.hpp"
-#include "zrp/timeout.hpp"
 #include "zrp/log.hpp"
 #include "zrp/rlimit.hpp"
 
@@ -119,7 +118,7 @@ struct tcp_share_worker : enable_shared_from_this<tcp_share_worker> {
 	log::logger logger_;
 
 	steady_timer ddl_;
-    string_view ddl_action_;
+	string_view ddl_action_;
 
 	tcp_share_worker(asio::io_context &ioc, tcp_share_ptr_t share, int id, tcp::socket s);
 	~tcp_share_worker();
@@ -150,7 +149,9 @@ struct controller_socket : enable_shared_from_this<controller_socket> {
 	waitqueue<msg_t> to_send_;
 	bool stopping_ = false;
 	log::logger logger_;
-	// steady_timer ddl_;
+
+	steady_timer ddl_;
+	string_view ddl_action_;
 
 	controller_socket(asio::io_context &ioc, tcp::socket s, string client_uuid);
 	static shared_ptr<controller_socket> create(asio::io_context &ioc, tcp::socket s, string client_uuid);
@@ -164,7 +165,9 @@ struct controller_socket : enable_shared_from_this<controller_socket> {
 	awaitable<void> recv_msgs();
 	awaitable<void> send_msgs();
 
-	// awaitable<void> ddl_actor();
+	void set_ddl(const string_view action, chrono::seconds after);
+	void cancel_ddl();
+	awaitable<void> ddl_actor();
 
 	awaitable<void> handle_msg(msg::ping);
 };
@@ -296,7 +299,7 @@ inline awaitable<void> tcp_share::got_worker(tcp_share_worker_weak_ptr_t w) {
 }
 
 inline tcp_share_worker::tcp_share_worker(asio::io_context &ioc, tcp_share_ptr_t share, int id, tcp::socket s)
-		: ioc_(ioc), share_(share), id_(id), s_(move(s)), to_send_(ioc.get_executor()), logger_(log::tag_tcp_share_worker{share->share_id_, id}), ddl_(ioc_)
+		: ioc_(ioc), share_(share), id_(id), s_(move(s)), to_send_(ioc.get_executor()), logger_(log::tag_tcp_share_worker{share->share_id_, id}), ddl_(ioc)
 {
 	share_->nr_workers_ ++;
 }
@@ -317,11 +320,16 @@ inline void tcp_share_worker::try_stop() noexcept {
 	to_send_.close();
 	try {
 		s_.close();
+	} catch (...) {}
+	try {
 		ddl_.cancel();
 	} catch (...) {}
 }
 
 inline void tcp_share_worker::handle_error(const exception& e) noexcept {
+	if (visited_) {
+		return;
+	}
 	if (!stopping_) {
 		logger_.error("got an exception, stopping : ").with_exception(e);
 		try_stop();
@@ -331,6 +339,7 @@ inline void tcp_share_worker::handle_error(const exception& e) noexcept {
 }
 
 inline void tcp_share_worker::run() {
+	ddl_.expires_at(steady_timer::time_point::max());
 	auto sg = this->shared_from_this();
 	co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
 		co_await recv_msgs();
@@ -353,9 +362,6 @@ inline awaitable<void> tcp_share_worker::recv_msgs() {
 			}, unmarshal_msg<msg::ping>(in));
 		}
 	} catch (const exception& e) {
-		if (visited_) {
-			co_return;
-		}
 		handle_error(e);
 	}
 }
@@ -367,9 +373,6 @@ inline awaitable<void> tcp_share_worker::send_msgs() {
 			co_await send_msg(s_, m);
 		}
 	} catch (const exception& e) {
-		if (visited_) {
-			co_return;
-		}
 		handle_error(e);
 	}
 }
@@ -384,10 +387,16 @@ inline void tcp_share_worker::cancel_ddl() {
 }
 
 inline awaitable<void> tcp_share_worker::ddl_actor() {
-	for (;;) {
-		try {
-			co_await ddl_.async_wait(asio::use_awaitable);
-			if (stopping_) {
+	try {
+		for (;;) {
+			try {
+				co_await ddl_.async_wait(asio::use_awaitable);
+			} catch (const system_error & se) {
+				if (se.code() != asio::error::operation_aborted) {
+					throw;
+				}
+			}
+			if (stopping_ || visited_) {
 				co_return;
 			}
 			if (ddl_.expiry() <= steady_timer::clock_type::now()) {
@@ -395,17 +404,14 @@ inline awaitable<void> tcp_share_worker::ddl_actor() {
 				try_stop();
 				co_return;
 			}
-		} catch (const exception& e) {
-			// omitted
 		}
+	} catch (const exception& e) {
+		handle_error(e);
 	}
 }
 
 inline awaitable<void> tcp_share_worker::handle_msg(msg::ping) {
 	logger_.trace("recv a ping");
-	if (visited_) {
-		co_return;
-	}
 	msg::pong pong;
 	co_await to_send_.provide(marshal_msg(pong));
 	logger_.trace("sent a pong");
@@ -415,13 +421,15 @@ inline awaitable<tcp::socket> tcp_share_worker::visit() {
 	visited_ = true;
 	msg::visit_tcp_share v;
 	co_await to_send_.provide(marshal_msg(v));
+	ddl_.expires_at(steady_timer::time_point::max());
+	ddl_.cancel();
 	s_.cancel();
 	to_send_.close();
 	co_return move(s_);
 }
 
 inline controller_socket::controller_socket(asio::io_context &ioc, tcp::socket s, string client_uuid)
-	: ioc_(ioc), s_(move(s)), client_uuid_(client_uuid), to_send_(ioc.get_executor()), logger_(log::tag_controller{client_uuid})
+	: ioc_(ioc), s_(move(s)), client_uuid_(client_uuid), to_send_(ioc.get_executor()), logger_(log::tag_controller{client_uuid}), ddl_(ioc)
 {
 	logger_.info("connected");
 }
@@ -449,6 +457,9 @@ inline void controller_socket::try_stop() noexcept {
 	try {
 		s_.close();
 	} catch (...) {}
+	try {
+		ddl_.cancel();
+	} catch (...) {}
 }
 
 inline void controller_socket::handle_error(const exception& e) noexcept {
@@ -461,6 +472,7 @@ inline void controller_socket::handle_error(const exception& e) noexcept {
 }
 
 inline void controller_socket::run() {
+	ddl_.expires_at(steady_timer::time_point::max());
 	auto sg = this->shared_from_this();
 	co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
 		co_await recv_msgs();
@@ -473,7 +485,8 @@ inline void controller_socket::run() {
 inline awaitable<void> controller_socket::recv_msgs() {
 	try {
 		for (;;) {
-			auto in = co_await with_timeout(ioc_, recv_msg(s_), s_, std::chrono::seconds(60));
+			set_ddl("recv_msgs()", std::chrono::seconds(60));
+			auto in = co_await recv_msg(s_);
 			co_await visit([this](auto&& m) mutable -> auto {
 				return this->handle_msg(forward<decltype(m)>(m));
 			}, unmarshal_msg<msg::ping>(in));
@@ -484,8 +497,10 @@ inline awaitable<void> controller_socket::recv_msgs() {
 }
 
 inline awaitable<void> controller_socket::handle_msg(msg::ping) {
+	logger_.trace("recv a ping");
 	msg::pong pong;
 	co_await to_send_.provide(marshal_msg(pong));
+	logger_.trace("sent a pong");
 }
 
 inline awaitable<void> controller_socket::send_msgs() {
@@ -497,6 +512,39 @@ inline awaitable<void> controller_socket::send_msgs() {
 		for (;;) {
 			msg_t m = co_await to_send_.wait();
 			co_await send_msg(s_, m);
+		}
+	} catch (const exception& e) {
+		handle_error(e);
+	}
+}
+
+inline void controller_socket::set_ddl(const string_view action, chrono::seconds after) {
+	ddl_.expires_after(after);
+	ddl_action_ = action;
+}
+
+inline void controller_socket::cancel_ddl() {
+	ddl_.expires_at(steady_timer::time_point::max());
+}
+
+inline awaitable<void> controller_socket::ddl_actor() {
+	try {
+		for (;;) {
+			try {
+				co_await ddl_.async_wait(asio::use_awaitable);
+			} catch (const system_error & se) {
+				if (se.code() != asio::error::operation_aborted) {
+					throw;
+				}
+			}
+			if (stopping_) {
+				co_return;
+			}
+			if (ddl_.expiry() <= steady_timer::clock_type::now()) {
+				logger_.warning(fmt::format(FMT_COMPILE("timeout exceeded : {}"), ddl_action_));
+				try_stop();
+				co_return;
+			}
 		}
 	} catch (const exception& e) {
 		handle_error(e);

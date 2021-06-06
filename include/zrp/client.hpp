@@ -308,14 +308,14 @@ inline void controller::add_tcp_share(string share_id, tcp::endpoint ep, unsigne
 
 inline void controller::try_stop() noexcept {
 	stopping_ = true;
+	try {
+		s_.close();
+	} catch(...) {}
 	for (auto& it : tcp_shares_) {
 		if (tcp_share_ptr_t sh = it.second.lock()) {
 			sh->try_stop();
 		}
 	}
-	try {
-		s_.close();
-	} catch(...) {}
 	try {
 		ping_timer_.cancel();
 	} catch (...) {}
@@ -514,6 +514,11 @@ inline awaitable<void> tcp_share_worker::handle_msg(msg::visit_tcp_share) {
 	ping_timer_.expires_at(steady_timer::time_point::max());
 	ping_timer_.cancel();
 	s_.cancel();
+
+	msg::visit_confirmed m;
+	co_await send_msg(s_, marshal_msg(m));
+	logger_.trace("sent confirm");
+
 	co_await share_->wq_.provide(move(s_));
 }
 

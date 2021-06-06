@@ -282,9 +282,23 @@ namespace zrp {
 		return {};
 	}
 
+	struct visit_confirmed {
+	};
+
+	void tag_invoke(json::value_from_tag, json::value& jv, const visit_confirmed& c)
+	{
+		jv = {};
+	}
+
+	visit_confirmed tag_invoke(json::value_to_tag<visit_confirmed>, const json::value& jv)
+	{
+		return {};
+	}
+
 	template <> struct msg_type_id<client_hello> { inline static const string s = "client_hello"; };
 	template <> struct msg_type_id<ping> { inline static const string s = "ping"; };
 	template <> struct msg_type_id<tcp_share_worker_hello> { inline static const string s = "tcp_share_worker_hello"; };
+	template <> struct msg_type_id<visit_confirmed> { inline static const string s = "visit_confirmed"; };
 
 	template <class ReturningVariant>
 	ReturningVariant unmarshal_msg_impl(string type_id, const msg_t& msg) {

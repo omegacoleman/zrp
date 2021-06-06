@@ -110,6 +110,7 @@ struct tcp_share_worker : enable_shared_from_this<tcp_share_worker> {
 	asio::io_context &ioc_;
 	tcp::socket s_;
 	bool visited_ = false;
+	bool visited_confirmed_ = false;
 	int id_;
 	waitqueue<msg_t> to_send_;
 
@@ -419,7 +420,7 @@ inline awaitable<void> tcp_share_worker::ddl_actor() {
 					throw;
 				}
 			}
-			if (stopping_ || visited_) {
+			if (stopping_ || visited_confirmed_) {
 				co_return;
 			}
 			if (ddl_.expiry() <= steady_timer::clock_type::now()) {
@@ -442,12 +443,24 @@ inline awaitable<void> tcp_share_worker::handle_msg(msg::ping) {
 
 inline awaitable<tcp::socket> tcp_share_worker::visit() {
 	visited_ = true;
+	s_.cancel();
+
+	set_ddl("visit()", std::chrono::seconds(20));
+
 	msg::visit_tcp_share v;
 	co_await to_send_.provide(marshal_msg(v));
-	ddl_.expires_at(steady_timer::time_point::max());
-	ddl_.cancel();
-	s_.cancel();
 	to_send_.close();
+
+retry:
+	auto in = co_await recv_msg(s_);
+	auto m = unmarshal_msg<msg::ping, msg::visit_confirmed>(in);
+	if (std::holds_alternative<msg::ping>(m)) {
+		goto retry;
+	}
+
+	visited_confirmed_ = true;
+	cancel_ddl();
+
 	co_return move(s_);
 }
 

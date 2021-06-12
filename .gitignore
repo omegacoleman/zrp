@@ -1,4 +1,6 @@
 /build
+/install
+/output
 /vendor
 compile_commands.json
 

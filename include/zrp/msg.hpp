@@ -7,6 +7,7 @@
 #include "zrp/bindings.hpp"
 
 #include "zrp/json_misc.hpp"
+#include "zrp/exceptions.hpp"
 #include "zrp/log.hpp"
 
 namespace zrp {
@@ -88,6 +89,10 @@ namespace zrp {
 		size_t len = extract_uint64<endian::big>(span<char, 8>{buf_meta, 8});
 		log::as(log::tag_msg{}).debug(fmt::format(FMT_COMPILE("Read len {}"), len));
 
+		if (len > 8192) {
+			throw exceptions::msg_too_big{len};
+		}
+
 		size_t remain = len;
 		while (remain > 4096) {
 			char buf_payload[4096];
@@ -121,22 +126,6 @@ namespace zrp {
 
 	namespace msg
 	{
-
-	namespace exceptions {
-
-		struct unexpected_msg_type : public exception {
-			std::string msg_;
-
-			unexpected_msg_type(string s)
-				: msg_(std::string{"Unexpected msg type_id : "} + s)
-				{}
-
-			const char * what() const noexcept {
-				return msg_.c_str();
-			}
-		};
-
-	}
 
 	template <class msg>
 	class msg_type_id;

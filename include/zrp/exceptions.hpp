@@ -38,6 +38,30 @@ namespace exceptions {
 		}
 	};
 
+	struct unexpected_msg_type : public exception {
+		std::string msg_;
+
+		unexpected_msg_type(string s)
+			: msg_(fmt::format(FMT_COMPILE("unexpected msg type_id : {}"), s))
+			{}
+
+		const char * what() const noexcept {
+			return msg_.c_str();
+		}
+	};
+
+	struct msg_too_big: public exception {
+		std::string msg_;
+
+		msg_too_big(size_t sz)
+			: msg_(fmt::format(FMT_COMPILE("message too big : {} bytes"), sz))
+			{}
+
+		const char * what() const noexcept {
+			return msg_.c_str();
+		}
+	};
+
 }
 
 }

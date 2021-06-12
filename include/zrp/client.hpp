@@ -93,7 +93,8 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 
 	awaitable<void> add_worker();
 	void cleanup_workers();
-	awaitable<void> chk_need_workers();
+	void chk_need_workers();
+	awaitable<void> chk_need_workers_coro();
 	awaitable<void> add_workers(size_t count);
 };
 
@@ -160,7 +161,9 @@ inline awaitable<tcp::socket> tcp_share::upstream::get_socket() {
 inline tcp_share::downstream::downstream(shared_ptr<tcp_share> sh) noexcept : sh_(sh) {}
 
 inline awaitable<tcp::socket> tcp_share::downstream::get_socket() {
-	co_return co_await sh_->wq_.wait();
+    auto ret = co_await sh_->wq_.wait();
+    sh_->chk_need_workers();
+    co_return move(ret);
 }
 
 inline tcp_share::tcp_share(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port)
@@ -241,7 +244,16 @@ inline void tcp_share::cleanup_workers() {
 	}
 }
 
-inline awaitable<void> tcp_share::chk_need_workers() {
+inline void tcp_share::chk_need_workers() {
+	if (nr_workers_ < cfg.worker_count_low) {
+        auto sg = this->shared_from_this();
+		co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
+			co_await chk_need_workers_coro();
+		}, asio::detached);
+	}
+}
+
+inline awaitable<void> tcp_share::chk_need_workers_coro() {
 	if (closing_)
 		co_return;
 	if (nr_workers_ < cfg.worker_count_low) {
@@ -384,11 +396,7 @@ inline tcp_share_worker::tcp_share_worker(asio::io_context &ioc, tcp_share_ptr_t
 }
 
 inline tcp_share_worker::~tcp_share_worker() {
-	if ((--share_->nr_workers_) < cfg.worker_count_low) {
-		co_spawn(ioc_, [share = this->share_]() mutable -> awaitable<void> {
-			co_await share->chk_need_workers();
-		}, asio::detached);
-	}
+    share_->nr_workers_--;
 }
 
 inline shared_ptr<tcp_share_worker> tcp_share_worker::create(asio::io_context &ioc, tcp_share_ptr_t share, tcp::socket s, string share_id, int worker_id) {

@@ -28,6 +28,8 @@ struct config_t {
 	int worker_count_low;
 	int worker_count_more;
 
+	bool access_log;
+
 	int rlimit_nofile;
 };
 
@@ -59,6 +61,7 @@ void tag_invoke(json::value_from_tag, json::value& jv, const config_t& c)
 		{"worker_count_initial", c.worker_count_initial},
 		{"worker_count_low", c.worker_count_low},
 		{"worker_count_more", c.worker_count_more},
+		{"access_log", c.access_log},
 		{"rlimit_nofile", c.rlimit_nofile},
 	};
 }
@@ -73,6 +76,7 @@ config_t tag_invoke(json::value_to_tag<config_t>, const json::value& jv)
 	extract_with_default(obj, ret.worker_count_initial, "worker_count_initial", 16);
 	extract_with_default(obj, ret.worker_count_low, "worker_count_low", 8);
 	extract_with_default(obj, ret.worker_count_more, "worker_count_more", 16);
+	extract_with_default(obj, ret.access_log, "access_log", true);
 	extract_with_default(obj, ret.rlimit_nofile, "rlimit_nofile", 65533);
 	return ret;
 }
@@ -107,6 +111,8 @@ struct config_t {
 	string sharing_host;
 	string welcome;
 
+	bool access_log;
+
 	int rlimit_nofile;
 };
 
@@ -117,6 +123,7 @@ void tag_invoke(json::value_from_tag, json::value& jv, const config_t& c)
 		{"server_port", c.server_port},
 		{"sharing_host", c.sharing_host},
 		{"welcome", c.welcome},
+		{"access_log", c.access_log},
 		{"rlimit_nofile", c.rlimit_nofile},
 	};
 }
@@ -129,6 +136,7 @@ config_t tag_invoke(json::value_to_tag<config_t>, const json::value& jv)
 	extract_with_default(obj, ret.server_port, "server_port", 11433);
 	extract_with_default(obj, ret.sharing_host, "sharing_host", "0.0.0.0");
 	extract_with_default(obj, ret.welcome, "welcome", "welcome to zrp server");
+	extract_with_default(obj, ret.access_log, "access_log", true);
 	extract_with_default(obj, ret.rlimit_nofile, "rlimit_nofile", 65533);
 	return ret;
 }

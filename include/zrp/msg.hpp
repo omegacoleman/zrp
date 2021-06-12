@@ -154,6 +154,28 @@ namespace zrp {
 		return ts;
 	}
 
+	struct tcp_endpoint {
+		string_view ip;
+		unsigned short port;
+	};
+
+	void tag_invoke(json::value_from_tag, json::value& jv, const tcp_endpoint& c)
+	{
+		jv = {
+			{"ip", c.ip},
+			{"port", c.port},
+		};
+	}
+
+	tcp_endpoint tag_invoke(json::value_to_tag<tcp_endpoint>, const json::value& jv)
+	{
+		tcp_endpoint ep;
+		json::object const& obj = jv.as_object();
+		extract(obj, ep.ip, "ip");
+		extract(obj, ep.port, "port");
+		return ep;
+	}
+
 	// server -> client
 
 	struct server_hello {
@@ -192,16 +214,25 @@ namespace zrp {
 	}
 
 	struct visit_tcp_share {
+		uint64_t epoch;
+		tcp_endpoint peer;
 	};
 
 	void tag_invoke(json::value_from_tag, json::value& jv, const visit_tcp_share& c)
 	{
-		jv = {};
+		jv = {
+			{"epoch", c.epoch},
+			{"peer", c.peer},
+		};
 	}
 
 	visit_tcp_share tag_invoke(json::value_to_tag<visit_tcp_share>, const json::value& jv)
 	{
-		return {};
+		visit_tcp_share v;
+		json::object const& obj = jv.as_object();
+		extract(obj, v.epoch, "epoch");
+		extract(obj, v.peer, "peer");
+		return v;
 	}
 
 

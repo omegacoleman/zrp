@@ -107,6 +107,7 @@ inline string to_string(const tag_t &t) {
 enum class severity_t {
 	debug,
 	trace,
+	access,
 	info,
 	warning,
 	error,
@@ -118,6 +119,8 @@ inline string to_string(const severity_t &s) {
 			return "DEBG";
 		case severity_t::trace:
 			return "TRAC";
+		case severity_t::access:
+			return "ACCS";
 		case severity_t::info:
 			return "INFO";
 		case severity_t::warning:
@@ -209,6 +212,8 @@ struct message {
 			severity_style = fg(fmt::terminal_color::yellow);
 		} else if (severity_ == severity_t::info) {
 			severity_style = fg(fmt::terminal_color::cyan);
+		} else if (severity_ == severity_t::access) {
+			severity_style = fg(fmt::terminal_color::green);
 		}
 		fmt::print("[{}][{}]<{}>: {}\n",
 			fmt::format(may(time_style), "{:%a, %d %b %Y %T %z}", time_),
@@ -239,6 +244,10 @@ struct logger {
 
 	message trace(string s) {
 		return gen<severity_t::trace>(s);
+	}
+
+	message access(string s) {
+		return gen<severity_t::access>(s);
 	}
 
 	message info(string s) {

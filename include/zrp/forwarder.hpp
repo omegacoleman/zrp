@@ -84,9 +84,10 @@ namespace zrp
 				auto sg = this->shared_from_this();
 				try {
 					for(;;) {
-						tcp::socket d_s = co_await dow_.get_socket();
-						co_spawn(exec_, [this, sg, d_s = move(d_s)]() mutable -> awaitable<void> {
-							co_await handle_socket(move(d_s));
+						tcp::endpoint ep;
+						tcp::socket d_s = co_await dow_.get_socket(ep);
+						co_spawn(exec_, [this, sg, d_s = move(d_s), ep]() mutable -> awaitable<void> {
+							co_await handle_socket(move(d_s), ep);
 						}, asio::detached);
 					}
 				} catch (const exception& e) {
@@ -95,9 +96,9 @@ namespace zrp
 				}
 			}
 
-			awaitable<void> handle_socket(tcp::socket s) {
+			awaitable<void> handle_socket(tcp::socket s, const tcp::endpoint ep) {
 				try {
-					auto u_s = co_await ups_.get_socket();
+					auto u_s = co_await ups_.get_socket(ep);
 					int id = next_pipe_id();
 					pipe_ptr_t p = pipe_t::create(exec_, this->shared_from_this(), id, move(s), move(u_s));
 					p->run();

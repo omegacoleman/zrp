@@ -74,7 +74,7 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 		tcp_share_ptr_t sh_;
 
 		upstream(tcp_share_ptr_t sh);
-		awaitable<tcp::socket> get_socket();
+		awaitable<tcp::socket> get_socket(const tcp::endpoint ep);
 	};
 
 	struct downstream {
@@ -85,7 +85,7 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 
 		downstream(tcp_share_ptr_t sh);
 		void try_stop() noexcept;
-		awaitable<tcp::socket> get_socket();
+		awaitable<tcp::socket> get_socket(tcp::endpoint& ep);
 	};
 
 	using forwarder_t = forwarder<upstream, downstream>;
@@ -139,7 +139,7 @@ struct tcp_share_worker : enable_shared_from_this<tcp_share_worker> {
 
 	awaitable<void> handle_msg(msg::ping);
 
-	awaitable<tcp::socket> visit();
+	awaitable<tcp::socket> visit(const tcp::endpoint ep);
 
 };
 
@@ -230,10 +230,10 @@ inline tcp_share::upstream::upstream(tcp_share_ptr_t sh)
 	: sh_(sh)
 {}
 
-inline awaitable<tcp::socket> tcp_share::upstream::get_socket() {
+inline awaitable<tcp::socket> tcp_share::upstream::get_socket(const tcp::endpoint ep) {
 	for (;;) {
 		if(auto worker = (co_await sh_->wq_.wait()).lock()) { // skip if worker died before visit
-			co_return co_await worker->visit();
+			co_return co_await worker->visit(ep);
 		}
 	}
 }
@@ -248,8 +248,8 @@ inline void tcp_share::downstream::try_stop() noexcept {
 	} catch(...) {}
 }
 
-inline awaitable<tcp::socket> tcp_share::downstream::get_socket() {
-	co_return co_await ac_.async_accept(asio::use_awaitable);
+inline awaitable<tcp::socket> tcp_share::downstream::get_socket(tcp::endpoint &ep) {
+	co_return co_await ac_.async_accept(ep, asio::use_awaitable);
 }
 
 inline tcp_share::upstream tcp_share::make_upstream() {
@@ -441,13 +441,19 @@ inline awaitable<void> tcp_share_worker::handle_msg(msg::ping) {
 	logger_.trace("sent a pong");
 }
 
-inline awaitable<tcp::socket> tcp_share_worker::visit() {
+inline awaitable<tcp::socket> tcp_share_worker::visit(const tcp::endpoint ep) {
 	visited_ = true;
 	s_.cancel();
 
 	set_ddl("visit()", std::chrono::seconds(20));
 
 	msg::visit_tcp_share v;
+	v.epoch = chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now().time_since_epoch()).count();
+	string ip = ep.address().to_string();
+	if (cfg.access_log)
+		share_->logger_.access(fmt::format(FMT_COMPILE("accessed from ip {} port {}"), ip, ep.port()));
+	v.peer.ip = ip;
+	v.peer.port = ep.port();
 	co_await to_send_.provide(marshal_msg(v));
 	to_send_.close();
 
@@ -484,11 +490,6 @@ inline tcp_share_ptr_t controller_socket::add_tcp_share(string share_id, unsigne
 
 inline void controller_socket::try_stop() noexcept {
 	stopping_ = true;
-	for (auto& it : shares_) {
-		if (auto ptr = it.second.lock()) {
-			ptr->try_stop();
-		}
-	}
 	to_send_.close();
 	try {
 		s_.close();
@@ -496,6 +497,11 @@ inline void controller_socket::try_stop() noexcept {
 	try {
 		ddl_.cancel();
 	} catch (...) {}
+	for (auto& it : shares_) {
+		if (auto ptr = it.second.lock()) {
+			ptr->try_stop();
+		}
+	}
 }
 
 inline void controller_socket::handle_error(const exception& e) noexcept {

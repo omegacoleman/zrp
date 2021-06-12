@@ -17,13 +17,13 @@ template <class T, class U>
 concept same_as = detail::SameHelper<T, U> &&detail::SameHelper<U, T>;
 
 template <class T>
-	concept IsUpstream = requires(T a) {
-		{ a.get_socket() } -> same_as<awaitable<tcp::socket>>;
+	concept IsUpstream = requires(T a, const tcp::endpoint ep) {
+		{ a.get_socket(ep) } -> same_as<awaitable<tcp::socket>>;
 	};
 
 template <class T>
-	concept IsDownstream = requires(T a) {
-		{ a.get_socket() } -> same_as<awaitable<tcp::socket>>;
+	concept IsDownstream = requires(T a, tcp::endpoint& ep) {
+		{ a.get_socket(ep) } -> same_as<awaitable<tcp::socket>>;
 	};
 
 template <class T>

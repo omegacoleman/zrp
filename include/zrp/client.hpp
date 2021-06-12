@@ -61,14 +61,14 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 		shared_ptr<tcp_share> sh_;
 
 		upstream(shared_ptr<tcp_share> sh) noexcept;
-		awaitable<tcp::socket> get_socket();
+		awaitable<tcp::socket> get_socket(const tcp::endpoint ep);
 	};
 
 	struct downstream {
 		shared_ptr<tcp_share> sh_;
 
 		downstream(shared_ptr<tcp_share> sh) noexcept;
-		awaitable<tcp::socket> get_socket();
+		awaitable<tcp::socket> get_socket(tcp::endpoint &ep);
 	};
 
 	using forwarder_t = forwarder<upstream, downstream>;
@@ -157,7 +157,7 @@ struct tcp_share_worker : enable_shared_from_this<tcp_share_worker> {
 
 inline tcp_share::upstream::upstream(shared_ptr<tcp_share> sh) noexcept : sh_(sh) {}
 
-inline awaitable<tcp::socket> tcp_share::upstream::get_socket() {
+inline awaitable<tcp::socket> tcp_share::upstream::get_socket(const tcp::endpoint ep) {
 	tcp::socket ret{sh_->ioc_};
 	co_await ret.async_connect(sh_->ep_, asio::use_awaitable);
 	co_return move(ret);
@@ -165,7 +165,8 @@ inline awaitable<tcp::socket> tcp_share::upstream::get_socket() {
 
 inline tcp_share::downstream::downstream(shared_ptr<tcp_share> sh) noexcept : sh_(sh) {}
 
-inline awaitable<tcp::socket> tcp_share::downstream::get_socket() {
+inline awaitable<tcp::socket> tcp_share::downstream::get_socket(tcp::endpoint& ep) {
+	// TODO bind ep to socket in waitgroup
     auto ret = co_await sh_->wq_.wait();
     sh_->chk_need_workers();
     co_return move(ret);
@@ -508,8 +509,10 @@ inline awaitable<void> tcp_share_worker::ping_actor() {
 	}
 }
 
-inline awaitable<void> tcp_share_worker::handle_msg(msg::visit_tcp_share) {
+inline awaitable<void> tcp_share_worker::handle_msg(msg::visit_tcp_share v) {
 	logger_.trace("was visited");
+	if (cfg.access_log)
+		share_->logger_.access(fmt::format(FMT_COMPILE("accessed from ip {} port {}"), v.peer.ip, v.peer.port));
 	visited_ = true;
 	ping_timer_.expires_at(steady_timer::time_point::max());
 	ping_timer_.cancel();

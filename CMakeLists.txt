@@ -39,3 +39,7 @@ target_link_libraries(zclient PUBLIC ${ZRP_LIBRARIES})
 add_executable(zserver ${PROJECT_SOURCE_DIR}/src/zserver.cpp)
 target_include_directories(zserver PUBLIC ${ZRP_INCLUDE_DIRS})
 target_link_libraries(zserver PUBLIC ${ZRP_LIBRARIES})
+
+install(TARGETS zclient zserver RUNTIME DESTINATION bin)
+include(InstallRequiredSystemLibraries)
+

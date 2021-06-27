@@ -131,6 +131,50 @@ inline string to_string(const severity_t &s) {
 	return "INVL";
 }
 
+namespace thread_role {
+
+struct main {};
+
+inline string to_string(const main&) {
+	return "MAIN";
+}
+
+struct fwd_pool_worker { int nr; };
+
+inline string to_string(const fwd_pool_worker& r) {
+	return fmt::format(FMT_COMPILE("FWD{}"), r.nr);
+}
+
+struct sigint_handler {};
+
+inline string to_string(const sigint_handler&) {
+	return "SIGH";
+}
+
+struct unknown {};
+
+inline string to_string(const unknown&) {
+	std::ostringstream oss;
+	oss << "TID:" << std::this_thread::get_id();
+	return oss.str();
+}
+
+using role_t = variant<main, fwd_pool_worker, sigint_handler, unknown>;
+
+thread_local static inline role_t curr_role = unknown{};
+
+inline string to_string(const role_t &r) {
+	return std::visit([](auto && r) -> string {
+		return to_string(r);
+	}, r);
+}
+
+inline void as(role_t r) {
+	curr_role = r;
+}
+
+}
+
 struct message {
 	chrono::system_clock::time_point time_;
 	severity_t severity_;
@@ -202,6 +246,7 @@ struct message {
 		if ((!show_debug) && severity_ == severity_t::debug)
 			return;
 		fmt::text_style time_style = fmt::fg(fmt::terminal_color::bright_blue),
+			trole_style = fmt::fg(fmt::terminal_color::yellow),
 			tag_style = fmt::fg(fmt::terminal_color::blue),
 			severity_style = {},
 			msg_style = {};
@@ -215,8 +260,9 @@ struct message {
 		} else if (severity_ == severity_t::access) {
 			severity_style = fg(fmt::terminal_color::green);
 		}
-		fmt::print("[{}][{}]<{}>: {}\n",
+		fmt::print("[{}][{}][{}]<{}>: {}\n",
 			fmt::format(may(time_style), "{:%a, %d %b %Y %T %z}", time_),
+			fmt::format(may(trole_style), "{}", thread_role::to_string(thread_role::curr_role)),
 			fmt::format(may(severity_style), "{}", to_string(severity_)),
 			fmt::format(may(tag_style), "{}", to_string(tag_)),
 			fmt::format(may(msg_style), "{}", msg_));

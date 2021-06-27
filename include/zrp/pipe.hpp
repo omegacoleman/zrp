@@ -76,6 +76,7 @@ namespace zrp {
 					char data[pipe_buffer_size];
 					for (;;) {
 						size_t n = co_await read_s.async_read_some(buffer(data, pipe_buffer_size), asio::use_awaitable);
+						logger_.trace(fmt::format(FMT_COMPILE(".. transferring {} bytes of data .."), n));
 						co_await async_write(write_s, buffer(data, n), asio::use_awaitable);
 					}
 				} catch (system_error & se) {

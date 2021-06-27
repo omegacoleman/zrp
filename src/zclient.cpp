@@ -8,38 +8,40 @@
 #include "zrp/client.hpp"
 #include "zrp/config.hpp"
 #include "zrp/dump_config.hpp"
+#include "zrp/io_threadpool.hpp"
 #include "zrp/log.hpp"
 
 namespace zrp {
 namespace client {
 
 asio::io_context ioc;
-asio::system_executor sysex;
+io_threadpool fwd_pool;
+asio::io_context sigint_ioc;
 int exit_code = 0;
 
 weak_ptr<controller> ctrl_weak;
 
 void try_grace_exit() {
-	auto logger = log::as(log::tag_main{});
-	static bool in_grace_exit = false;
-	if (in_grace_exit) {
-		logger.warning("got SIGINT again, aborting ..");
-		std::abort();
-	}
 	if (auto ptr = ctrl_weak.lock()) {
-		logger.info("got SIGINT, trying to grace exit ..");
 		ptr->try_stop();
 	}
-	in_grace_exit = true;
 }
 
 awaitable<void> handle_sigint(){
 	auto logger = log::as(log::tag_main{});
-	asio::signal_set signals(sysex, SIGINT);
+	asio::signal_set signals(sigint_ioc, SIGINT);
 	try {
 		for (;;) {
 			co_await signals.async_wait(asio::use_awaitable);
-			asio::post(ioc, try_grace_exit);
+			static bool in_grace_exit = false;
+			if (in_grace_exit) {
+				logger.warning("got SIGINT again, aborting ..");
+				std::abort();
+			} else {
+				logger.info("got SIGINT, trying to grace exit ..");
+				asio::post(ioc, try_grace_exit);
+			}
+			in_grace_exit = true;
 		}
 	} catch(const exception& e) {
 		logger.error("sigint handler got error : ").with_exception(e);
@@ -50,13 +52,32 @@ void run() {
 	auto logger = log::as(log::tag_main{});
 	try {
 		{
-			auto ctrl = controller::create(ioc);
+			auto ctrl = controller::create(ioc, fwd_pool);
 			ctrl->init();
 			ctrl->run();
 			ctrl_weak = ctrl;
 		}
-		co_spawn(sysex, handle_sigint, asio::detached);
+		co_spawn(sigint_ioc, handle_sigint, asio::detached);
+		thread sigint_thread([]() mutable {
+			log::thread_role::as(log::thread_role::sigint_handler{});
+			sigint_ioc.run();
+		});
+		asio::executor_work_guard<io_threadpool::executor_type> fwd_pool_guard{fwd_pool.get_executor()};
+		int n = cfg.forwarder_threads;
+		if (n <= 0) {
+			n = std::thread::hardware_concurrency();
+			if (n <= 0) {
+				n = 4;
+			}
+		}
+		fwd_pool.start_in_parallel(n, [](int thread_nr) {
+			log::thread_role::as(log::thread_role::fwd_pool_worker{thread_nr});
+		});
 		ioc.run();
+		fwd_pool_guard.reset();
+		fwd_pool.join_all();
+		sigint_ioc.stop();
+		sigint_thread.join();
 		logger.info("gracefully exited");
 	} catch (const exception &e) {
 		logger.error("client::run() got error, exiting : ").with_exception(e);
@@ -69,6 +90,7 @@ void run() {
 
 int main(int argc, char** argv) {
 	zrp::parse_env();
+	zrp::log::thread_role::as(zrp::log::thread_role::main{});
 	auto logger = zrp::log::as(zrp::log::tag_main{});
 	try {
 		std::vector<zrp::string> args{argv, argv + argc};

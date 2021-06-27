@@ -53,6 +53,7 @@ using ctrl_weak_ptr_t = weak_ptr<ctrl_t>;
 
 struct tcp_share : enable_shared_from_this<tcp_share> {
 	asio::io_context &ioc_;
+	asio::io_context &fwd_ioc_;
 	string share_id_;
 	unsigned short listen_port_;
 	tcp::endpoint listen_;
@@ -65,8 +66,8 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 	bool closing_ = false;
 	log::logger logger_;
 
-	tcp_share(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, unsigned short listen_port);
-	static shared_ptr<tcp_share> create(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, unsigned short port);
+	tcp_share(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, unsigned short listen_port);
+	static shared_ptr<tcp_share> create(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, unsigned short port);
 
 	struct upstream {
 		using tcp_share_ptr_t = shared_ptr<tcp_share>;
@@ -145,6 +146,7 @@ struct tcp_share_worker : enable_shared_from_this<tcp_share_worker> {
 
 struct controller_socket : enable_shared_from_this<controller_socket> {
 	asio::io_context &ioc_;
+	asio::io_context &fwd_ioc_;
 	tcp::socket s_;
 	string client_uuid_;
 	map<string, tcp_share_weak_ptr_t> shares_;
@@ -155,8 +157,8 @@ struct controller_socket : enable_shared_from_this<controller_socket> {
 	steady_timer ddl_;
 	string_view ddl_action_;
 
-	controller_socket(asio::io_context &ioc, tcp::socket s, string client_uuid);
-	static shared_ptr<controller_socket> create(asio::io_context &ioc, tcp::socket s, string client_uuid);
+	controller_socket(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, string client_uuid);
+	static shared_ptr<controller_socket> create(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, string client_uuid);
 
 	tcp_share_ptr_t add_tcp_share(string share_id, unsigned short port);
 
@@ -176,6 +178,7 @@ struct controller_socket : enable_shared_from_this<controller_socket> {
 
 struct server : enable_shared_from_this<server> {
 	asio::io_context &ioc_;
+	asio::io_context &fwd_ioc_;
 	map<string, ctrl_weak_ptr_t> ctrls_;
 	map<string, tcp_share_weak_ptr_t> tcp_shares_;
 	tcp::acceptor ac_;
@@ -184,6 +187,7 @@ struct server : enable_shared_from_this<server> {
 
 	struct socket_type : enable_shared_from_this<socket_type> {
 		asio::io_context &ioc_;
+		asio::io_context &fwd_ioc_;
 		tcp::socket s_;
 		steady_timer ddl_;
 		log::logger logger_;
@@ -192,8 +196,8 @@ struct server : enable_shared_from_this<server> {
 		bool stopping_ = false;
 		bool finished_ = false;
 
-		socket_type(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server);
-		static shared_ptr<socket_type> create(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server);
+		socket_type(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, shared_ptr<server> server);
+		static shared_ptr<socket_type> create(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, shared_ptr<server> server);
 
 		void try_stop() noexcept;
 		void handle_error(const exception &e) noexcept;
@@ -206,8 +210,8 @@ struct server : enable_shared_from_this<server> {
 	};
 	list<weak_ptr<socket_type>> sockets_;
 
-	server(asio::io_context &ioc);
-	static shared_ptr<server> create(asio::io_context &ioc);
+	server(asio::io_context &ioc, asio::io_context &fwd_ioc);
+	static shared_ptr<server> create(asio::io_context &ioc, asio::io_context &fwd_ioc);
 
 	void try_stop() noexcept;
 	void handle_error(const exception &e) noexcept;
@@ -218,12 +222,12 @@ struct server : enable_shared_from_this<server> {
 	void handle_socket(tcp::socket s);
 };
 
-inline tcp_share::tcp_share(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, unsigned short listen_port)
-	: ioc_(ioc), ctrl_(ctrl), share_id_(share_id), listen_port_(listen_port), listen_(tcp_share_host, listen_port), wq_(ioc.get_executor()), logger_(log::tag_tcp_share{share_id})
+inline tcp_share::tcp_share(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, unsigned short listen_port)
+	: ioc_(ioc), fwd_ioc_(fwd_ioc), ctrl_(ctrl), share_id_(share_id), listen_port_(listen_port), listen_(tcp_share_host, listen_port), wq_(ioc.get_executor()), logger_(log::tag_tcp_share{share_id})
 {}
 
-inline shared_ptr<tcp_share> tcp_share::create(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, unsigned short port) {
-	return make_shared<tcp_share>(ioc, ctrl, move(share_id), port);
+inline shared_ptr<tcp_share> tcp_share::create(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, unsigned short port) {
+	return make_shared<tcp_share>(ioc, fwd_ioc, ctrl, move(share_id), port);
 }
 
 inline tcp_share::upstream::upstream(tcp_share_ptr_t sh)
@@ -239,7 +243,7 @@ inline awaitable<tcp::socket> tcp_share::upstream::get_socket(const tcp::endpoin
 }
 
 inline tcp_share::downstream::downstream(tcp_share_ptr_t sh)
-	: ac_(sh->ioc_, sh->listen_), sh_(sh)
+	: ac_(sh->fwd_ioc_, sh->listen_), sh_(sh)
 {}
 
 inline void tcp_share::downstream::try_stop() noexcept {
@@ -263,7 +267,7 @@ inline tcp_share::downstream tcp_share::make_downstream() {
 inline void tcp_share::try_stop() noexcept {
 	closing_ = true;
 	if (forwarder_ptr_t ptr = fwd_.lock()) {
-		ptr->try_stop();
+		ptr->post_try_stop();
 	}
 	wq_.close();
 	for (auto& it : workers_) {
@@ -284,7 +288,7 @@ inline void tcp_share::handle_error(const exception& e) noexcept {
 
 inline awaitable<void> tcp_share::run_forwarder() {
 	try {
-		forwarder_ptr_t fwd = forwarder_t::create(ioc_, share_id_, make_upstream(), make_downstream());
+		forwarder_ptr_t fwd = forwarder_t::create(fwd_ioc_, share_id_, make_upstream(), make_downstream());
 		fwd_ = fwd;
 		co_await fwd->forward();
 	} catch (const exception& e) {
@@ -294,7 +298,7 @@ inline awaitable<void> tcp_share::run_forwarder() {
 
 inline void tcp_share::run() {
 	auto sg = this->shared_from_this();
-	co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
+	co_spawn(fwd_ioc_, [this, sg]() mutable -> awaitable<void> {
 		co_await run_forwarder();
 	}, asio::detached);
 }
@@ -346,6 +350,7 @@ inline void tcp_share_worker::try_stop() noexcept {
 		s_.close();
 	} catch (...) {}
 	try {
+		ddl_.expires_at(steady_timer::time_point::max());
 		ddl_.cancel();
 	} catch (...) {}
 }
@@ -408,13 +413,16 @@ inline void tcp_share_worker::set_ddl(const string_view action, chrono::seconds 
 
 inline void tcp_share_worker::cancel_ddl() {
 	ddl_.expires_at(steady_timer::time_point::max());
+	ddl_.cancel();
 }
 
 inline awaitable<void> tcp_share_worker::ddl_actor() {
 	try {
 		for (;;) {
 			try {
+				logger_.trace("ddl_actor enter wait");
 				co_await ddl_.async_wait(asio::use_awaitable);
+				logger_.trace("ddl_actor leave wait");
 			} catch (const system_error & se) {
 				if (se.code() != asio::error::operation_aborted) {
 					throw;
@@ -442,47 +450,51 @@ inline awaitable<void> tcp_share_worker::handle_msg(msg::ping) {
 }
 
 inline awaitable<tcp::socket> tcp_share_worker::visit(const tcp::endpoint ep) {
-	visited_ = true;
-	s_.cancel();
+	auto exec = co_await this_coro::executor;
+	co_await asio::co_spawn(ioc_, [this, ep]() mutable -> awaitable<void> {
+		visited_ = true;
+		s_.cancel();
 
-	set_ddl("visit()", std::chrono::seconds(20));
+		set_ddl("visit()", std::chrono::seconds(20));
 
-	msg::visit_tcp_share v;
-	v.epoch = chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now().time_since_epoch()).count();
-	string ip = ep.address().to_string();
-	if (cfg.access_log)
-		share_->logger_.access(fmt::format(FMT_COMPILE("accessed from ip {} port {}"), ip, ep.port()));
-	v.peer.ip = ip;
-	v.peer.port = ep.port();
-	co_await to_send_.provide(marshal_msg(v));
-	to_send_.close();
+		msg::visit_tcp_share v;
+		v.epoch = chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now().time_since_epoch()).count();
+		string ip = ep.address().to_string();
+		if (cfg.access_log)
+			share_->logger_.access(fmt::format(FMT_COMPILE("accessed from ip {} port {}"), ip, ep.port()));
+		v.peer.ip = ip;
+		v.peer.port = ep.port();
+		co_await to_send_.provide(marshal_msg(v));
+		to_send_.close();
 
-retry:
-	auto in = co_await recv_msg(s_);
-	auto m = unmarshal_msg<msg::ping, msg::visit_confirmed>(in);
-	if (std::holds_alternative<msg::ping>(m)) {
-		goto retry;
-	}
+	retry:
+		auto in = co_await recv_msg(s_);
+		auto m = unmarshal_msg<msg::ping, msg::visit_confirmed>(in);
+		if (std::holds_alternative<msg::ping>(m)) {
+			goto retry;
+		}
 
-	visited_confirmed_ = true;
-	cancel_ddl();
+		visited_confirmed_ = true;
+		cancel_ddl();
+
+	}, asio::use_awaitable);
 
 	co_return move(s_);
 }
 
-inline controller_socket::controller_socket(asio::io_context &ioc, tcp::socket s, string client_uuid)
-	: ioc_(ioc), s_(move(s)), client_uuid_(client_uuid), to_send_(ioc.get_executor()), logger_(log::tag_controller{client_uuid}), ddl_(ioc)
+inline controller_socket::controller_socket(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, string client_uuid)
+	: ioc_(ioc), fwd_ioc_(fwd_ioc), s_(move(s)), client_uuid_(client_uuid), to_send_(ioc.get_executor()), logger_(log::tag_controller{client_uuid}), ddl_(ioc)
 {
 	logger_.info("connected");
 }
 
-inline shared_ptr<controller_socket> controller_socket::create(asio::io_context &ioc, tcp::socket s, string client_uuid) {
-	return make_shared<controller_socket>(ioc, move(s), move(client_uuid));
+inline shared_ptr<controller_socket> controller_socket::create(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, string client_uuid) {
+	return make_shared<controller_socket>(ioc, fwd_ioc, move(s), move(client_uuid));
 }
 
 inline tcp_share_ptr_t controller_socket::add_tcp_share(string share_id, unsigned short port) {
 	logger_.info(fmt::format(FMT_COMPILE("add tcp share : {} at port {}"), share_id, port));
-	tcp_share_ptr_t sh = tcp_share::create(ioc_, this->shared_from_this(), share_id, port);
+	tcp_share_ptr_t sh = tcp_share::create(ioc_, fwd_ioc_, this->shared_from_this(), share_id, port);
 	shares_.emplace(share_id, sh);
 	sh->run();
 	return sh;
@@ -495,6 +507,7 @@ inline void controller_socket::try_stop() noexcept {
 		s_.close();
 	} catch (...) {}
 	try {
+		ddl_.expires_at(steady_timer::time_point::max());
 		ddl_.cancel();
 	} catch (...) {}
 	for (auto& it : shares_) {
@@ -593,12 +606,12 @@ inline awaitable<void> controller_socket::ddl_actor() {
 	}
 }
 
-inline server::server(asio::io_context &ioc)
-	: ioc_(ioc), ac_(ioc, {asio::ip::address::from_string(cfg.server_host), cfg.server_port}), logger_(log::tag_server{})
+inline server::server(asio::io_context &ioc, asio::io_context &fwd_ioc)
+	: ioc_(ioc), fwd_ioc_(fwd_ioc), ac_(ioc, {asio::ip::address::from_string(cfg.server_host), cfg.server_port}), logger_(log::tag_server{})
 {}
 
-inline shared_ptr<server> server::create(asio::io_context &ioc) {
-	return make_shared<server>(ioc);
+inline shared_ptr<server> server::create(asio::io_context &ioc, asio::io_context &fwd_ioc) {
+	return make_shared<server>(ioc, fwd_ioc);
 }
 
 inline void server::try_stop() noexcept {
@@ -655,18 +668,18 @@ inline void server::cleanup_sockets() {
 }
 
 inline void server::handle_socket(tcp::socket s) {
-	auto ptr = server::socket_type::create(ioc_, move(s), this->shared_from_this());
+	auto ptr = server::socket_type::create(ioc_, fwd_ioc_, move(s), this->shared_from_this());
 	cleanup_sockets();
 	sockets_.push_back(ptr);
 	ptr->run();
 }
 
-inline server::socket_type::socket_type(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server)
-	: ioc_(ioc), s_(move(s)), ddl_(ioc), logger_(log::tag_server{}), server_(server)
+inline server::socket_type::socket_type(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, shared_ptr<server> server)
+	: ioc_(ioc), fwd_ioc_(fwd_ioc), s_(move(s)), ddl_(ioc), logger_(log::tag_server{}), server_(server)
 {}
 
-inline shared_ptr<server::socket_type> server::socket_type::create(asio::io_context &ioc, tcp::socket s, shared_ptr<server> server) {
-	return make_shared<server::socket_type>(ioc, move(s), server);
+inline shared_ptr<server::socket_type> server::socket_type::create(asio::io_context &ioc, asio::io_context &fwd_ioc, tcp::socket s, shared_ptr<server> server) {
+	return make_shared<server::socket_type>(ioc, fwd_ioc, move(s), server);
 }
 
 inline void server::socket_type::try_stop() noexcept {
@@ -740,7 +753,7 @@ inline awaitable<void> server::socket_type::ddl_actor() {
 inline awaitable<void> server::socket_type::handle_hello_msg(msg::client_hello hello) {
 	string client_uuid{hello.client_uuid};
 
-	ctrl_ptr_t ctrl = ctrl_t::create(ioc_, move(s_), client_uuid);
+	ctrl_ptr_t ctrl = ctrl_t::create(ioc_, fwd_ioc_, move(s_), client_uuid);
 	if (server_->ctrls_.find(client_uuid) == server_->ctrls_.end()) {
 		server_->ctrls_.emplace(client_uuid, ctrl);
 	} else {
@@ -764,6 +777,7 @@ inline awaitable<void> server::socket_type::handle_hello_msg(msg::client_hello h
 		}
 	}
 	ctrl->run();
+		ddl_.expires_at(steady_timer::time_point::max());
 	co_return;
 }
 

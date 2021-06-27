@@ -4,6 +4,8 @@
 
 #pragma once
 
+// #define BOOST_ASIO_ENABLE_HANDLER_TRACKING
+
 #include <cstdio>
 #include <atomic>
 #include <deque>
@@ -21,6 +23,7 @@
 #include <span>
 #include <bit>
 #include <stack>
+#include <thread>
 
 #include "boost/asio.hpp"
 #include "boost/json.hpp"
@@ -47,6 +50,7 @@ using std::weak_ptr;
 using std::make_shared;
 using std::enable_shared_from_this;
 using std::make_unique;
+using std::thread;
 using boost::asio::buffer;
 using boost::asio::async_read;
 using boost::asio::async_write;

@@ -46,6 +46,7 @@ using tcp_share_weak_ptr_t = weak_ptr<tcp_share>;
 
 struct tcp_share : enable_shared_from_this<tcp_share> {
 	asio::io_context &ioc_;
+	asio::io_context &fwd_ioc_;
 	const string share_id_;
 	const tcp::endpoint ep_;
 	waitqueue<tcp::socket> wq_;
@@ -76,8 +77,8 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 	using forwarder_weak_ptr_t = weak_ptr<forwarder_t>;
 	forwarder_weak_ptr_t fwd_;
 
-	tcp_share(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port);
-	static shared_ptr<tcp_share> create(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port);
+	tcp_share(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port);
+	static shared_ptr<tcp_share> create(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port);
 
 	void try_stop() noexcept;
 	void handle_error(const exception& e) noexcept;
@@ -99,6 +100,7 @@ struct tcp_share : enable_shared_from_this<tcp_share> {
 
 struct controller : enable_shared_from_this<controller> {
 	asio::io_context &ioc_;
+	asio::io_context &fwd_ioc_;
 	tcp::endpoint ep_;
 	tcp::socket s_;
 	string client_uuid_;
@@ -108,8 +110,8 @@ struct controller : enable_shared_from_this<controller> {
 	log::logger logger_;
 	steady_timer ping_timer_;
 
-	controller(asio::io_context &ioc);
-	static shared_ptr<controller> create(asio::io_context &ioc);
+	controller(asio::io_context &ioc, asio::io_context &fwd_ioc);
+	static shared_ptr<controller> create(asio::io_context &ioc, asio::io_context &fwd_ioc);
 	void init();
 
 	void add_tcp_share(string share_id, tcp::endpoint ep, unsigned short port);
@@ -172,18 +174,18 @@ inline awaitable<tcp::socket> tcp_share::downstream::get_socket(tcp::endpoint& e
     co_return move(ret);
 }
 
-inline tcp_share::tcp_share(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port)
-	: ioc_(ioc), ctrl_(ctrl), share_id_(share_id), ep_(move(ep)), port_(port), wq_(ioc.get_executor()), logger_(log::tag_tcp_share{share_id})
+inline tcp_share::tcp_share(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port)
+	: ioc_(ioc), fwd_ioc_(fwd_ioc), ctrl_(ctrl), share_id_(share_id), ep_(move(ep)), port_(port), wq_(ioc.get_executor()), logger_(log::tag_tcp_share{share_id})
 {}
 
-inline shared_ptr<tcp_share> tcp_share::create(asio::io_context &ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port) {
-	return make_shared<tcp_share>(ioc, ctrl, move(share_id), move(ep), port);
+inline shared_ptr<tcp_share> tcp_share::create(asio::io_context &ioc, asio::io_context &fwd_ioc, ctrl_ptr_t ctrl, string share_id, tcp::endpoint ep, unsigned short port) {
+	return make_shared<tcp_share>(ioc, fwd_ioc, ctrl, move(share_id), move(ep), port);
 }
 
 inline void tcp_share::try_stop() noexcept {
 	closing_ = true;
 	if (forwarder_ptr_t ptr = fwd_.lock()) {
-		ptr->try_stop();
+		ptr->post_try_stop();
 	}
 	wq_.close();
 	for (auto& it : workers_) {
@@ -217,14 +219,14 @@ inline tcp_share::downstream tcp_share::make_downstream() noexcept {
 
 inline void tcp_share::run() {
 	auto sg = this->shared_from_this();
-	co_spawn(ioc_, [this, sg]() mutable -> awaitable<void> {
+	co_spawn(fwd_ioc_, [this, sg]() mutable -> awaitable<void> {
 		co_await run_forwarder();
 	}, asio::detached);
 }
 
 inline awaitable<void> tcp_share::run_forwarder() {
 	try {
-		forwarder_ptr_t fwd = forwarder_t::create(ioc_, share_id_, make_upstream(), make_downstream());
+		forwarder_ptr_t fwd = forwarder_t::create(fwd_ioc_, share_id_, make_upstream(), make_downstream());
 		fwd_ = fwd;
 		co_await fwd->forward();
 	} catch (const exception& e) {
@@ -276,8 +278,8 @@ inline awaitable<void> tcp_share::add_workers(size_t count) {
 	logger_.trace(fmt::format(FMT_COMPILE("got {} more workers"), count));
 }
 
-inline controller::controller(asio::io_context &ioc)
-	: ioc_(ioc), s_(ioc), ep_(asio::ip::address::from_string(cfg.server_host), cfg.server_port), client_uuid_(uuids::to_string(uuids::random_generator()())), logger_(log::tag_controller{client_uuid_}), ping_timer_(ioc)
+inline controller::controller(asio::io_context &ioc, asio::io_context &fwd_ioc)
+	: ioc_(ioc), fwd_ioc_(fwd_ioc), s_(ioc), ep_(asio::ip::address::from_string(cfg.server_host), cfg.server_port), client_uuid_(uuids::to_string(uuids::random_generator()())), logger_(log::tag_controller{client_uuid_}), ping_timer_(ioc)
 {
 	hello_.version = 0; // TODO
 	hello_.client_uuid = client_uuid_;
@@ -290,12 +292,12 @@ inline void controller::init() {
 	}
 }
 
-inline shared_ptr<controller> controller::create(asio::io_context &ioc) {
-	return make_shared<controller>(ioc);
+inline shared_ptr<controller> controller::create(asio::io_context &ioc, asio::io_context &fwd_ioc) {
+	return make_shared<controller>(ioc, fwd_ioc);
 }
 
 inline void controller::add_tcp_share(string share_id, tcp::endpoint ep, unsigned short port) {
-	tcp_share_ptr_t sh = tcp_share::create(ioc_, this->shared_from_this(), share_id, move(ep), port);
+	tcp_share_ptr_t sh = tcp_share::create(ioc_, fwd_ioc_, this->shared_from_this(), share_id, move(ep), port);
 	sh->run();
 	tcp_shares_.emplace(share_id, sh);
 

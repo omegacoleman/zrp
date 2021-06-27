@@ -24,6 +24,8 @@ struct config_t {
 	};
 	map<string, tcp_share_t> tcp_shares;
 
+	int forwarder_threads;
+
 	int worker_count_initial;
 	int worker_count_low;
 	int worker_count_more;
@@ -58,6 +60,7 @@ void tag_invoke(json::value_from_tag, json::value& jv, const config_t& c)
 		{"server_host", c.server_host},
 		{"server_port", c.server_port},
 		{"tcp_shares", c.tcp_shares},
+		{"forwarder_threads", c.forwarder_threads},
 		{"worker_count_initial", c.worker_count_initial},
 		{"worker_count_low", c.worker_count_low},
 		{"worker_count_more", c.worker_count_more},
@@ -73,6 +76,7 @@ config_t tag_invoke(json::value_to_tag<config_t>, const json::value& jv)
 	extract(obj, ret.server_host, "server_host");
 	extract_with_default(obj, ret.server_port, "server_port", 11433);
 	extract_with_default(obj, ret.tcp_shares, "tcp_shares", map<string, config_t::tcp_share_t>{});
+	extract_with_default(obj, ret.forwarder_threads, "forwarder_threads", -1);
 	extract_with_default(obj, ret.worker_count_initial, "worker_count_initial", 16);
 	extract_with_default(obj, ret.worker_count_low, "worker_count_low", 8);
 	extract_with_default(obj, ret.worker_count_more, "worker_count_more", 16);
@@ -111,6 +115,8 @@ struct config_t {
 	string sharing_host;
 	string welcome;
 
+	int forwarder_threads;
+
 	bool access_log;
 
 	int rlimit_nofile;
@@ -123,6 +129,7 @@ void tag_invoke(json::value_from_tag, json::value& jv, const config_t& c)
 		{"server_port", c.server_port},
 		{"sharing_host", c.sharing_host},
 		{"welcome", c.welcome},
+		{"forwarder_threads", c.forwarder_threads},
 		{"access_log", c.access_log},
 		{"rlimit_nofile", c.rlimit_nofile},
 	};
@@ -136,6 +143,7 @@ config_t tag_invoke(json::value_to_tag<config_t>, const json::value& jv)
 	extract_with_default(obj, ret.server_port, "server_port", 11433);
 	extract_with_default(obj, ret.sharing_host, "sharing_host", "0.0.0.0");
 	extract_with_default(obj, ret.welcome, "welcome", "welcome to zrp server");
+	extract_with_default(obj, ret.forwarder_threads, "forwarder_threads", -1);
 	extract_with_default(obj, ret.access_log, "access_log", true);
 	extract_with_default(obj, ret.rlimit_nofile, "rlimit_nofile", 65533);
 	return ret;

@@ -83,12 +83,20 @@ namespace zrp
 				co_await asio::post(exec, asio::use_awaitable);
 			}
 
-			awaitable<void> handle_error(const exception& e) noexcept {
+			awaitable<void> handle_error(const exception_ptr eptr) noexcept {
 				if (!stopping_) {
-					logger_.error("got an exception, stopping : ").with_exception(e);
+					try {
+						std::rethrow_exception(eptr);
+					} catch(const exception& e) {
+						logger_.error("got an exception, stopping : ").with_exception(e);
+					}
 					co_await try_stop();
 				} else {
-					logger_.trace("exited by exception : ").with_exception(e);
+					try {
+						std::rethrow_exception(eptr);
+					} catch(const exception& e) {
+						logger_.trace("exited by exception : ").with_exception(e);
+					}
 				}
 			}
 
@@ -103,6 +111,7 @@ namespace zrp
 
 			awaitable<void> forward() {
 				auto sg = this->shared_from_this();
+				exception_ptr eptr;
 				try {
 					for(;;) {
 						tcp::endpoint ep;
@@ -111,9 +120,12 @@ namespace zrp
 							co_await handle_socket(move(d_s), ep);
 						}, asio::detached);
 					}
-				} catch (const exception& e) {
-					co_await handle_error(e);
-					throw;
+				} catch (const exception e) { // clang prohibits co_await inside catch block
+					eptr = std::current_exception();
+				}
+				if (eptr) {
+					co_await handle_error(eptr);
+					std::rethrow_exception(eptr);
 				}
 			}
 
